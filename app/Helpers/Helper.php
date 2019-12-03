@@ -3,12 +3,8 @@
 namespace App\Helpers;
 
 use Carbon\Carbon;
-use Log;
-use AWS;
+use Illuminate\Support\Facades\Log;
 use Exception;
-use Aws\Sns\Exception\SnsException;
-use GuzzleHttp\Client;
-use GuzzleHttp\RequestOptions;
 
 class Helper
 {
@@ -97,159 +93,6 @@ class Helper
         return new \Illuminate\Pagination\LengthAwarePaginator(array_values($data), $totalCount, $itemPerPage);
     }
 
-    public static function pushNotificationFirebase($body, $href, $icon, $tokens)
-    {
-        if ($tokens == null || !is_array($tokens) || !count($tokens)) {
-            return;
-        }
-        Log::debug('pushNotificationFirebase: [body] = ' . $body . ', [href] = ' . $href . ', [icon] = ' . $icon . ', [numToken] = ' . count($tokens));
-        $header = [
-            'Authorization' => 'key=' . config('aws.firebase_private_key'),
-            'Content-Type' => 'application/json',
-        ];
-        $message = [
-            'href' => $href,
-            'body' => $body,
-            'title' => config('aws.push_notification_title'),
-            'icon' => $icon,
-            'requireInteraction' => true,
-        ];
-        $payload = [
-            'registration_ids' => $tokens,
-            'data' => $message
-        ];
-
-        try {
-            $client = new Client();
-            $response = $client->post(config('aws.firebase_api_url'), [
-                RequestOptions::HEADERS => $header,
-                RequestOptions::JSON => $payload,
-            ]);
-
-            Log::debug($response->getBody());
-        } catch (Exception $e) {
-            Log::error($e);
-        }
-    }
-
-    public static function pushNotification(array $message, string $key, any $stringValue)
-    {
-        try {
-            $sns = AWS::createClient('sns');
-            $sns->publish([
-                'Message' => json_encode([
-                    'default' => json_encode($message),
-                    'APNS_SANDBOX' => json_encode([
-                        'aps' => [
-                            'alert' => $message,
-                            'sound' => 'default',
-                        ]
-                    ])
-                ]),
-                'MessageStructure' => 'json',
-                'TopicArn' => config('push-notification.topic_arn'),
-                'MessageAttributes' => [
-                    $key => [
-                        'DataType' => 'Number',
-                        'StringValue' => $stringValue,
-                    ]
-                ]
-            ]);
-        } catch (SnsException $e) {
-            Log::error($e);
-
-            return false;
-        }
-
-        return true;
-    }
-
-    public static function createEndpoint(string $device_token = null, int $typePlatform)
-    {
-        Log::debug('createEndpoint ' . '$device_token = ' . $device_token . ';$typePlatform = ' . $typePlatform);
-        if (!$device_token) {
-            return '';
-        }
-        try {
-            $sns = AWS::createClient('sns');
-            if ($typePlatform == config('push-notification.device_platform.android')) {
-                $platformArn = config('push-notification.android_application_arn');
-            } else {
-                $platformArn = config('push-notification.ios_application_arn');
-            }
-            $result = $sns->createPlatformEndpoint(array(
-                'PlatformApplicationArn' => $platformArn,
-                'Token' => $device_token,
-            ));
-            if ($result['EndpointArn']) {
-                $sns->setEndpointAttributes(array(
-                    'EndpointArn' => $result['EndpointArn'],
-                    'Attributes' => array(
-                        'Enabled' => 'true',
-                    ),
-                ));
-            }
-
-            return $result['EndpointArn'] ?? '';
-        } catch (SnsException $e) {
-            Log::error($e);
-            return '';
-        }
-    }
-
-    public static function subscribeToTopic(string $endpoint_arn = null, string $key, any $stringValue)
-    {
-        Log::debug('subscribeToTopic ' . '$endpoint_arn = ' . $endpoint_arn . '; $key = ' . $key . '; $stringValue = ' . $stringValue);
-        if (!$endpoint_arn) {
-            return '';
-        }
-        try {
-            $sns = AWS::createClient('sns');
-            $result = $sns->subscribe([
-                'Endpoint' => $endpoint_arn,
-                'Protocol' => 'application',
-                'TopicArn' => config('push-notification.topic_arn'),
-            ]);
-            if ($result['SubscriptionArn']) {
-                $sns->setSubscriptionAttributes(array(
-                    'SubscriptionArn' => $result['SubscriptionArn'],
-                    'AttributeName' => 'FilterPolicy',
-                    'AttributeValue' => json_encode([
-                        $key => [[
-                            'numeric' => ['=', $stringValue]
-                        ]]
-                    ])
-                ));
-            }
-
-            return $result['SubscriptionArn'] ?? '';
-        } catch (SnsException $e) {
-            Log::error($e);
-
-            return '';
-        }
-    }
-
-    public static function unsubscribeFromTopic(string $subscription_arn = null)
-    {
-        Log::debug('unsubscribeFromTopic ' . '$subscription_arn = ' . $subscription_arn);
-        if (!$subscription_arn) {
-            return false;
-        }
-        try {
-            $sns = AWS::createClient('sns');
-            $sns->unsubscribe([
-                'SubscriptionArn' => $subscription_arn
-            ]);
-        } catch (SnsException $e) {
-            Log::error($e);
-
-            return false;
-        }
-
-        return true;
-    }
-
     public static function getFileNameExportCsv(string $name)
     {
         return $name . '_' . strtotime(Carbon::now()) . '.csv';
@@ -267,28 +110,5 @@ class Helper
     public static function subStr($string, $length = 15)
     {
         return mb_strlen($string) >= $length ? (mb_substr($string, 0, $length) . '...') : $string;
-    }
-
-    public static function deleteAllFileAndDir($directory)
-    {
-        $paths = glob($directory);
-
-        foreach ($paths as $dirPath) {
-            if (!is_dir($dirPath)) {
-                throw new InvalidArgumentException("$dirPath must be a directory");
-            }
-            if (substr($dirPath, strlen($dirPath) - 1, 1) != '/') {
-                $dirPath .= '/';
-            }
-            $files = glob($dirPath . '*', GLOB_MARK);
-            foreach ($files as $file) {
-                if (is_dir($file)) {
-                    self::deleteDir($file);
-                } else {
-                    unlink($file);
-                }
-            }
-            rmdir($dirPath);
-        }
     }
 }
